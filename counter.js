@@ -14,7 +14,7 @@
     // 장비·평가명. 같은 칸에 이 단어가 있으면 그 칸의 환자는 '기타(장비) 1대1'이고, 이름 뒤 알파벳 1글자는 동명이인 표기로 본다
     equipmentWords: ['ESWT', '에리고', '족저압', '체평형', '신장', '로코멧', '모닝', 'sEMG'],
     // 그 밖의 주석 단어(환자로 세지 않음)
-    ignoreWords: ['RG', 'GE', '통증', '접수', '건수', '점심', '병동', '외진', '부도사유', '조기퇴근', '퇴근', '연차', '반차', '휴가', '교육', '회의', '외출'],
+    ignoreWords: ['RG', 'GE', 'OS', '통증', '접수', '건수', '점심', '병동', '외진', '부도사유', '조기퇴근', '퇴근', '연차', '반차', '휴가', '교육', '회의', '외출'],
     // 헤더(치료사명)에 괄호가 있으면 카운팅 제외 (예: 김효정B(통증), 신하린(8병동팀))
     excludeHeaderWithParen: true,
   };
@@ -273,7 +273,7 @@
   }
 
   // ───────────────────────── 라인 해석 ─────────────────────────
-  const NAME_RE = /^([A-Z]?)([가-힣]{2,4})\s?([A-Z]{0,2})$/; // 접두1 + 이름 + 접미0~2
+  const NAME_RE = /^([A-Z]?)([가-힣]{2,4})([A-Z]{0,2})$/; // 접두1 + 이름 + 접미0~2
   // 장비·주석 단어 판정: 영문 포함 단어는 부분일치, 한글 단어는 '단어로 시작하고 바로 뒤에 한글이 없을 때'(이름 오인 방지)
   function isIgnoredBy(core, w) {
     if (!w) return false;
@@ -286,9 +286,51 @@
 
   // 외국인 이름(영문): 'SHEN N'(접미 코드), 'G SHEN'(접두 1대다), 'SHEN'
   const LATIN_RE = /^(?:([A-Z])\s+)?([A-Za-z]{3,})(?:\s+([A-Z]{1,2}))?$/;
+  const latinWords = cfg => [...(cfg.equipmentWords || []), ...(cfg.ignoreWords || [])].filter(w => /[A-Za-z]/.test(w));
+
+  /** 한 줄을 이름부 / 주석부로 분리.
+   *  '/은명표G RG (월수금)' → name '은명표G', equipment(RG는 주석이라 false)
+   *  '*장연우 ESWT S'      → name '장연우', equipment true
+   *  '/이은창GRG'           → name '이은창G'
+   *  '*최정규B RT3'         → name '최정규B', equipment true (평가코드)
+   *  '한대석E1'             → name '한대석', equipment true
+   *  '*(일)김옥자'          → name '김옥자'
+   *  '/한인숙B N'           → name '한인숙BN'
+   */
+  function splitLine(core, cfg) {
+    let s = core.replace(/^\([^)]*\)\s*/, ''); // 선행 괄호 (일) 제거
+    const tokens = s.split(/\s+/).filter(Boolean);
+    let name = tokens.shift() || '';
+    let equipment = false;
+    const eqWords = (cfg.equipmentWords || []), lw = latinWords(cfg);
+    for (const t of tokens) {
+      if (eqWords.some(w => isIgnoredBy(t, w))) { equipment = true; break; }
+      if (lw.some(w => isIgnoredBy(t, w))) break;              // RG, OS 등 주석
+      if (/\d/.test(t)) { equipment = true; break; }            // RT3 등 평가코드
+      if (/^[A-Z]{1,2}$/.test(t) && (/[A-Z]*$/.exec(name)[0].length + t.length) <= 2) { name += t; continue; } // 띄어쓴 치료코드(접미 최대 2글자)
+      break;                                                    // 그 외 주석
+    }
+    // 이름부 뒤에 붙은 영문/숫자 꼬리 정리
+    const m = /^([A-Z]?)([가-힣]{2,4}|[A-Za-z]{3,})([A-Za-z0-9-]*)$/.exec(name);
+    if (m) {
+      let tail = m[3];
+      for (const w of lw) { // 'GRG' → 'G', 'sEMG-A' → ''
+        const i = tail.toUpperCase().indexOf(w.toUpperCase());
+        if (i >= 0) { if (eqWords.includes(w)) equipment = true; tail = tail.slice(0, i); }
+      }
+      const ev = /^([A-Z]{0,2})(\d+)$/.exec(tail);            // 'E1' → 평가 → 코드 없음
+      if (ev) { equipment = true; tail = ev[1].length === 1 ? '' : ev[1]; }
+      name = m[1] + m[2] + tail;
+    }
+    return { name, equipment };
+  }
   function isEquipmentLine(line, cfg) {
     const core = stripMarks(line.text);
-    return !!core && (cfg.equipmentWords || []).some(w => isIgnoredBy(core, w));
+    if (!core) return false;
+    const firstTok = core.replace(/^\([^)]*\)\s*/, '').split(/\s+/)[0] || '';
+    const tokHasHangul = /[가-힣]/.test(firstTok);
+    if ((cfg.equipmentWords || []).some(w => (/[A-Za-z]/.test(w) ? !tokHasHangul && isIgnoredBy(firstTok, w) : isIgnoredBy(firstTok, w)))) return true;
+    return splitLine(core, cfg).equipment;
   }
   function classifyLine(line, cfg, mode, ctx) {
     // mode: 'therapist' | 'fes'(FES열: 이름만, 전부 환자)   ctx.hasEquipment: 같은 칸에 장비명 줄이 있음
@@ -298,12 +340,19 @@
     if (fesTokens.length) return { type: 'fes', tokens: fesTokens, line };
     const core = stripMarks(text);
     if (!core) return { type: 'skip', line };
-    if ((cfg.equipmentWords || []).some(w => isIgnoredBy(core, w))) return { type: 'note', line, equipment: true };
-    if (cfg.ignoreWords.some(w => isIgnoredBy(core, w))) return { type: 'note', line };
-    if (/^[\d\s:]+$/.test(core) || /^\(.*\)$/.test(core) || /^-?\d+팀$/.test(core) || /[0-9]/.test(core)) return { type: 'note', line };
+    // 줄 전체가 장비/주석인지: 첫 토큰 기준으로 판정 (이름 뒤에 붙은 'GRG' 같은 꼬리는 splitLine에서 처리)
+    const firstTok = core.replace(/^\([^)]*\)\s*/, '').split(/\s+/)[0] || '';
+    const tokHasHangul = /[가-힣]/.test(firstTok);
+    const wordHits = w => (/[A-Za-z]/.test(w) ? !tokHasHangul && isIgnoredBy(firstTok, w) : isIgnoredBy(firstTok, w));
+    if ((cfg.equipmentWords || []).some(wordHits)) return { type: 'note', line, equipment: true };
+    if (cfg.ignoreWords.some(wordHits)) return { type: 'note', line };
+    if (/^[\d\s:]+$/.test(core) || /^\(.*\)?$/.test(core) || /^-?\d+(병동)?팀$/.test(core)) return { type: 'note', line };
+    if (!tokHasHangul && /\d/.test(firstTok)) return { type: 'note', line }; // E1, GE1, 1335
     const hadSlash = /^\s*[*\/]/.test(text);
+    const sp = splitLine(core, cfg);
+    const hasEquipment = ctx.hasEquipment || sp.equipment;
     let prefix, name, suffix;
-    const m = NAME_RE.exec(core.replace(/\s+/g, ''));
+    const m = NAME_RE.exec(sp.name);
     if (m) { [, prefix, name, suffix] = m; }
     else {
       const lm = LATIN_RE.exec(core);
@@ -320,7 +369,7 @@
     }
     let dup = '', code = '';
     if (suffix.length === 2) { dup = suffix[0]; code = suffix[1]; }
-    else if (suffix.length === 1) { if (ctx.hasEquipment) dup = suffix; else code = suffix; } // 장비 칸이면 알파벳 1글자는 동명이인
+    else if (suffix.length === 1) { if (hasEquipment) dup = suffix; else code = suffix; } // 장비 칸이면 알파벳 1글자는 동명이인
     const known = code ? cfg.oneCodes.includes(code) : false;
     return { type: 'patient', kind: 'one', name, dup, code, known, isFesOne: code === 'F', line, hadSlash, shortName: name.length === 2 };
   }
@@ -411,6 +460,7 @@
               }
             } else if (c.type === 'note') {
               out.tag = '';
+              if (c.odd && w > 0) { out.tag = '판독불가'; out.other = true; warnings.push(`${col.name} ${entry.ref}: "${ln.text}" 판독 불가 — 0으로 처리`); }
             }
             entry.lines.push(out);
           }
