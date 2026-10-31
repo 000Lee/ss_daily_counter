@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PT 시간표 건수 카운터</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --line:#d9dde3; --text:#1d2330; --muted:#6b7280; --one:#1f6feb; --grp:#c2410c; --grey:#9ca3af; --warn:#b45309; --bad:#b91c1c; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Malgun Gothic","Apple SD Gothic Neo",system-ui,sans-serif; background:var(--bg); color:var(--text); font-size:14px; }
+  header { padding:14px 20px; background:#fff; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; }
+  header .hint { color:var(--muted); font-size:12px; }
+  main { padding:16px 20px 60px; max-width:100%; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:14px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+  button, select, input[type=text] { font:inherit; padding:6px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  button { cursor:pointer; } button.primary { background:var(--one); color:#fff; border-color:var(--one); font-weight:600; }
+  button:disabled { opacity:.5; cursor:default; }
+  #drop { border:2px dashed var(--line); border-radius:8px; padding:18px; text-align:center; color:var(--muted); cursor:pointer; }
+  #drop.over { border-color:var(--one); background:#eef4ff; }
+  ul.files { list-style:none; padding:0; margin:10px 0 0; display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:6px; }
+  ul.files li { border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:12.5px; display:flex; justify-content:space-between; gap:8px; }
+  ul.files li .meta { color:var(--muted); }
+  ul.files li.err { border-color:var(--bad); color:var(--bad); }
+  details summary { cursor:pointer; font-weight:600; }
+  .cfg label { display:block; margin:8px 0 2px; font-size:12.5px; color:var(--muted); }
+  .cfg input[type=text] { width:100%; }
+  .warn { color:var(--warn); font-size:12.5px; }
+  .bad { color:var(--bad); }
+  /* 요약 */
+  table.sum { border-collapse:collapse; width:auto; }
+  table.sum th, table.sum td { border:1px solid var(--line); padding:5px 10px; text-align:right; white-space:nowrap; }
+  table.sum th { background:#f1f3f6; } table.sum td:first-child, table.sum th:first-child { text-align:left; }
+  table.sum tr.ex td { color:var(--grey); }
+  table.sum tr.total td { font-weight:700; background:#fafafa; }
+  /* 시간표 */
+  .gridwrap { overflow:auto; max-height:78vh; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  table.grid { border-collapse:separate; border-spacing:0; font-size:12px; }
+  table.grid th, table.grid td { border-right:1px solid var(--line); border-bottom:1px solid var(--line); vertical-align:top; padding:0; }
+  table.grid thead th { position:sticky; top:0; background:#f1f3f6; z-index:3; padding:6px 6px; min-width:132px; text-align:center; }
+  table.grid thead th.time, table.grid tbody th.time { position:sticky; left:0; background:#f1f3f6; z-index:2; min-width:54px; padding:6px; text-align:center; }
+  table.grid thead th.time { z-index:4; }
+  table.grid th.ex { color:var(--grey); text-decoration:line-through; }
+  table.grid th small { display:block; font-weight:400; color:var(--muted); }
+  table.grid td.cell { min-width:132px; }
+  table.grid td.ex { background:#fafafa; color:var(--grey); }
+  table.grid tr.skip td { background:#f9fafb; color:var(--grey); font-style:italic; }
+  .cellin { display:flex; flex-direction:column; min-height:46px; }
+  .lines { padding:4px 6px 2px; flex:1; }
+  .ln { line-height:1.35; white-space:nowrap; }
+  .ln.grey { color:var(--grey) !important; text-decoration:line-through; }
+  .ln.strike { text-decoration:line-through; }
+  .ln.note { color:var(--muted); font-size:11px; }
+  .ln .tag { font-size:10px; padding:0 4px; border-radius:3px; margin-left:4px; vertical-align:middle; background:#eef2ff; color:var(--one); }
+  .ln .tag.grp { background:#fff1e8; color:var(--grp); }
+  .ln .tag.off { background:#f3f4f6; color:var(--grey); }
+  .ln .tag.other { background:#fef3c7; color:var(--warn); }
+  .fes { margin:2px 0 2px 8px; font-size:11px; color:var(--grp); }
+  .fes .ref { color:var(--muted); }
+  .fes .nm.grey { color:var(--grey); text-decoration:line-through; }
+  .fes .nm.half { text-decoration:line-through; }
+  .fes.missing { color:var(--bad); }
+  .badges { display:flex; justify-content:space-between; font-size:11px; font-weight:700; padding:2px 6px; border-top:1px dashed #e5e7eb; }
+  .badges .b1 { color:var(--one); } .badges .b2 { color:var(--grp); }
+  .badges .zero { color:#d1d5db; font-weight:400; }
+  table.grid tfoot td { background:#f1f3f6; font-weight:700; font-size:12px; padding:6px; text-align:center; position:sticky; bottom:0; }
+  table.grid tfoot td .b1 { color:var(--one); } table.grid tfoot td .b2 { color:var(--grp); }
+  .legend { font-size:12px; color:var(--muted); margin-top:8px; display:flex; gap:14px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PT 시간표 건수 카운터</h1>
+  <span class="hint">엑셀은 브라우저 안에서만 읽습니다. 서버 전송·저장 없음.</span>
+</header>
+<main>
+  <section class="card">
+    <div id="drop">여기에 7·8·9·10팀 시간표 .xlsx 파일을 끌어다 놓거나 클릭해서 선택 (같은 날짜 4개)</div>
+    <input type="file" id="fileInput" accept=".xlsx" multiple hidden>
+    <ul class="files" id="fileList"></ul>
+    <div class="row" style="margin-top:12px">
+      <label>카운팅할 팀 <select id="teamSel"></select></label>
+      <button class="primary" id="runBtn" disabled>계산</button>
+      <button id="clearBtn">초기화</button>
+      <span id="dateWarn" class="warn"></span>
+    </div>
+    <details class="cfg" style="margin-top:10px">
+      <summary>판독 규칙 설정</summary>
+      <label>1대다 접두 알파벳 (쉼표 구분) — 이 외 접두도 1대다로 세되 "기타" 표시</label>
+      <input type="text" id="cfgGroup">
+      <label>확정 1대1 치료코드 (접미) — 이 외 접미/코드 없음은 1대1 "기타"</label>
+      <input type="text" id="cfgOne">
+      <label>환자로 세지 않는 장비·주석 단어 (쉼표 구분)</label>
+      <input type="text" id="cfgIgnore">
+      <label><input type="checkbox" id="cfgParen"> 헤더에 괄호가 있는 치료사 열 제외 (예: 김효정B(통증), 신하린(8병동팀))</label>
+      <div id="colToggles" style="margin-top:8px"></div>
+    </details>
+  </section>
+
+  <section class="card" id="summaryCard" hidden>
+    <div class="row" style="justify-content:space-between">
+      <strong id="summaryTitle"></strong>
+      <button id="copyBtn">요약 복사 (TSV)</button>
+    </div>
+    <div style="overflow:auto;margin-top:8px"><table class="sum" id="sumTable"></table></div>
+    <div id="warnings" class="warn" style="margin-top:8px"></div>
+    <div class="legend">
+      <span><b style="color:var(--one)">왼쪽 숫자</b> = 1대1</span>
+      <span><b style="color:var(--grp)">오른쪽 숫자</b> = 1대다</span>
+      <span><s style="color:var(--grey)">회색 취소선</s> = 부도(0)</span>
+      <span><s>검정 취소선</s> = 반부도(0.5)</span>
+      <span><span class="tag other" style="background:#fef3c7;color:var(--warn);padding:0 4px;border-radius:3px">기타</span> = 코드 미확인(1대1로 계산)</span>
+      <span><span style="background:#eef2ff;color:var(--one);padding:0 4px;border-radius:3px">F</span> = 1대1 FES</span>
+    </div>
+  </section>
+
+  <section id="gridCard" hidden>
+    <div class="gridwrap"><table class="grid" id="gridTable"></table></div>
+  </section>
+</main>
+
+<script src="counter.js"></script>
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const state = { schedules: [], errors: [], result: null, excludeColumns: new Set() };
+
+  // 설정 UI ↔ 값
+  const D = PTCounter.DEFAULTS;
+  $('cfgGroup').value = D.groupPrefixes.join(', ');
+  $('cfgOne').value = D.oneCodes.join(', ');
+  $('cfgIgnore').value = D.ignoreWords.join(', ');
+  $('cfgParen').checked = D.excludeHeaderWithParen;
+  function readCfg() {
+    const split = s => s.split(/[,，]/).map(x => x.trim()).filter(Boolean);
+    return {
+      groupPrefixes: split($('cfgGroup').value).map(x => x.toUpperCase()),
+      oneCodes: split($('cfgOne').value).map(x => x.toUpperCase()),
+      ignoreWords: split($('cfgIgnore').value),
+      excludeHeaderWithParen: $('cfgParen').checked,
+      excludeColumns: Array.from(state.excludeColumns),
+    };
+  }
+
+  // 파일 입력
+  const drop = $('drop'), fi = $('fileInput');
+  drop.addEventListener('click', () => fi.click());
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); addFiles(e.dataTransfer.files); });
+  fi.addEventListener('change', () => { addFiles(fi.files); fi.value = ''; });
+  $('clearBtn').addEventListener('click', () => { state.schedules = []; state.errors = []; state.result = null; state.excludeColumns.clear(); renderFiles(); $('summaryCard').hidden = true; $('gridCard').hidden = true; $('colToggles').innerHTML = ''; });
+
+  async function addFiles(list) {
+    for (const f of Array.from(list)) {
+      if (!/\.xlsx$/i.test(f.name)) { state.errors.push({ name: f.name, msg: 'xlsx만 지원' }); continue; }
+      try {
+        const wb = await PTCounter.readWorkbook(await f.arrayBuffer(), f.name);
+        const sch = PTCounter.interpretSchedule(wb);
+        if (sch.team == null) { state.errors.push({ name: f.name, msg: '팀 번호를 찾지 못함' }); continue; }
+        // 같은 팀 파일이 이미 있으면 교체
+        state.schedules = state.schedules.filter(s => s.team !== sch.team);
+        state.schedules.push(sch);
+      } catch (e) { console.error(e); state.errors.push({ name: f.name, msg: '읽기 실패: ' + e.message }); }
+    }
+    state.schedules.sort((a, b) => a.team - b.team);
+    renderFiles();
+  }
+
+  function renderFiles() {
+    const ul = $('fileList'); ul.innerHTML = '';
+    for (const s of state.schedules) {
+      const li = document.createElement('li');
+      li.innerHTML = `<span><b>${s.team}팀</b> ${esc(s.dateText)}</span><span class="meta">${esc(s.filename)}</span>`;
+      ul.appendChild(li);
+    }
+    for (const e of state.errors) {
+      const li = document.createElement('li'); li.className = 'err';
+      li.textContent = `${e.name} — ${e.msg}`; ul.appendChild(li);
+    }
+    state.errors = [];
+    const sel = $('teamSel'); const prev = sel.value; sel.innerHTML = '';
+    for (const s of state.schedules) { const o = document.createElement('option'); o.value = s.team; o.textContent = s.team + '팀'; sel.appendChild(o); }
+    if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+    else if (state.schedules.some(s => s.team === 7)) sel.value = '7';
+    $('runBtn').disabled = state.schedules.length === 0;
+    const dates = new Set(state.schedules.map(s => s.dateText.replace(/\s+/g, '')));
+    $('dateWarn').textContent = dates.size > 1 ? '⚠ 파일들의 날짜가 서로 다릅니다' : '';
+  }
+
+  // 계산
+  $('runBtn').addEventListener('click', run);
+  function run() {
+    const team = parseInt($('teamSel').value, 10);
+    try {
+      state.result = PTCounter.analyze(state.schedules, team, readCfg());
+    } catch (e) { alert(e.message); return; }
+    renderColToggles(); renderSummary(); renderGrid();
+  }
+
+  function renderColToggles() {
+    const r = state.result; const box = $('colToggles'); box.innerHTML = '<label>열 개별 제외</label>';
+    for (const th of r.therapists) {
+      const id = 'ex_' + th.col.letter;
+      const l = document.createElement('label'); l.style.display = 'inline-block'; l.style.marginRight = '10px';
+      const auto = th.col.grey || (r.cfg.excludeHeaderWithParen && th.col.hasParen);
+      l.innerHTML = `<input type="checkbox" id="${id}" ${th.excluded ? 'checked' : ''} ${auto ? 'disabled' : ''}> ${esc(th.name)}${auto ? ' (자동)' : ''}`;
+      box.appendChild(l);
+      l.querySelector('input').addEventListener('change', ev => { if (ev.target.checked) state.excludeColumns.add(th.col.letter); else state.excludeColumns.delete(th.col.letter); run(); });
+    }
+  }
+
+  const fmt = n => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+
+  function renderSummary() {
+    const r = state.result;
+    $('summaryCard').hidden = false;
+    $('summaryTitle').textContent = `${r.target.team}팀 · ${r.target.dateText}`;
+    const t = $('sumTable');
+    let html = '<tr><th>치료사</th><th>1대1</th><th>1대다</th><th>합계</th><th>기타(1대1)</th><th>F(1대1)</th><th>비고</th></tr>';
+    let T1 = 0, T2 = 0;
+    for (const th of r.therapists) {
+      if (th.excluded) { html += `<tr class="ex"><td>${esc(th.name)}</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>${esc(th.excludeReason)}</td></tr>`; continue; }
+      T1 += th.one; T2 += th.group;
+      html += `<tr><td>${esc(th.name)}</td><td>${fmt(th.one)}</td><td>${fmt(th.group)}</td><td>${fmt(th.one + th.group)}</td><td>${th.oneOther ? fmt(th.oneOther) : ''}</td><td>${th.oneFes ? fmt(th.oneFes) : ''}</td><td>${th.groupOther ? '1대다 미확인 접두 ' + fmt(th.groupOther) : ''}</td></tr>`;
+    }
+    html += `<tr class="total"><td>합계</td><td>${fmt(T1)}</td><td>${fmt(T2)}</td><td>${fmt(T1 + T2)}</td><td></td><td></td><td></td></tr>`;
+    t.innerHTML = html;
+    $('warnings').innerHTML = r.warnings.length ? '⚠ ' + r.warnings.map(esc).join('<br>⚠ ') : '';
+  }
+
+  function renderGrid() {
+    const r = state.result;
+    $('gridCard').hidden = false;
+    const ths = r.therapists;
+    let html = '<thead><tr><th class="time">시간</th>';
+    for (const th of ths) html += `<th class="${th.excluded ? 'ex' : ''}">${esc(th.name)}<small>${th.col.letter}열${th.excluded ? ' · ' + esc(th.excludeReason) : ''}</small></th>`;
+    html += '</tr></thead><tbody>';
+    r.target.rows.forEach((row, ri) => {
+      html += `<tr class="${row.skip ? 'skip' : ''}"><th class="time">${esc(row.label)}</th>`;
+      for (const th of ths) {
+        const c = th.cells[ri];
+        html += `<td class="cell ${th.excluded ? 'ex' : ''}">` + cellHtml(c, th.excluded) + '</td>';
+      }
+      html += '</tr>';
+    });
+    html += '</tbody><tfoot><tr><td>합계</td>';
+    for (const th of ths) html += `<td>${th.excluded ? '-' : `<span class="b1">${fmt(th.one)}</span> / <span class="b2">${fmt(th.group)}</span>`}</td>`;
+    html += '</tr></tfoot>';
+    $('gridTable').innerHTML = html;
+  }
+
+  function cellHtml(c, excluded) {
+    if (!c || !c.lines.length) return `<div class="cellin"><div class="lines"></div><div class="badges"><span class="zero">0</span><span class="zero">0</span></div></div>`;
+    let s = '<div class="cellin"><div class="lines">';
+    for (const l of c.lines) {
+      const cls = ['ln']; if (l.isGrey) cls.push('grey'); else if (l.strike) cls.push('strike'); if (l.type === 'note') cls.push('note');
+      const color = l.isGrey ? '' : `style="color:${l.color}"`;
+      let tag = '';
+      if (l.tag) {
+        const tcls = l.weight === 0 ? 'off' : (l.type === 'fes' || l.kind === 'group') ? 'grp' : '';
+        tag = `<span class="tag ${tcls}">${esc(l.tag.replace(' 기타', ''))}</span>` + (l.other ? '<span class="tag other">기타</span>' : '');
+      }
+      s += `<div class="${cls.join(' ')}" ${color}>${esc(l.text)}${tag}</div>`;
+      if (l.fes) {
+        for (const f of l.fes) {
+          if (f.missing) { s += `<div class="fes missing">↳ ${esc(f.key)} → ${esc(f.detail || '파일 없음')}</div>`; continue; }
+          const names = f.items.length ? f.items.map(it => `<span class="nm ${it.isGrey ? 'grey' : (it.strike ? 'half' : '')}">${esc(it.name + (it.dup || ''))}</span>`).join(', ') : '<span class="ref">빈칸</span>';
+          s += `<div class="fes">↳ ${esc(f.key)} <span class="ref">(${esc(f.ref)})</span> → ${names} <b>${fmt(f.sum)}</b></div>`;
+        }
+      }
+    }
+    s += '</div>';
+    if (!c.skipped) s += `<div class="badges"><span class="b1 ${c.one ? '' : 'zero'}">${fmt(c.one)}</span><span class="b2 ${c.group ? '' : 'zero'}">${fmt(c.group)}</span></div>`;
+    s += '</div>';
+    return s;
+  }
+
+  $('copyBtn').addEventListener('click', () => {
+    const r = state.result; if (!r) return;
+    const rows = [['치료사', '1대1', '1대다', '합계']];
+    for (const th of r.therapists) if (!th.excluded) rows.push([th.name, fmt(th.one), fmt(th.group), fmt(th.one + th.group)]);
+    navigator.clipboard.writeText(rows.map(x => x.join('\t')).join('\n')).then(() => { $('copyBtn').textContent = '복사됨'; setTimeout(() => $('copyBtn').textContent = '요약 복사 (TSV)', 1500); });
+  });
+
+  function esc(s) { return String(s ?? '').replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch])); }
+})();
+</script>
+</body>
+</html>
