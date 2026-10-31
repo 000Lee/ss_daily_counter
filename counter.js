@@ -11,8 +11,10 @@
     // 확정 1대1 치료코드(접미). 그 외 접미/코드없음 → 1대1 '기타'
     oneCodes: ['N', 'G', 'M', 'Z', 'F'],
     // 장비·평가·주석으로 간주해 환자로 세지 않는 단어(부분 일치)
-    ignoreWords: ['ESWT', '에리고', '족저압', '체평형', '신장', '로코멧', '모닝', 'sEMG', 'RG', '통증', '접수', '건수', '점심', '병동', '외진', '부도사유', 'GE',
-      '조기퇴근', '퇴근', '연차', '반차', '휴가', '교육', '회의', '외출'],
+    // 장비·평가명. 같은 칸에 이 단어가 있으면 그 칸의 환자는 '기타(장비) 1대1'이고, 이름 뒤 알파벳 1글자는 동명이인 표기로 본다
+    equipmentWords: ['ESWT', '에리고', '족저압', '체평형', '신장', '로코멧', '모닝', 'sEMG'],
+    // 그 밖의 주석 단어(환자로 세지 않음)
+    ignoreWords: ['RG', 'GE', '통증', '접수', '건수', '점심', '병동', '외진', '부도사유', '조기퇴근', '퇴근', '연차', '반차', '휴가', '교육', '회의', '외출'],
     // 헤더(치료사명)에 괄호가 있으면 카운팅 제외 (예: 김효정B(통증), 신하린(8병동팀))
     excludeHeaderWithParen: true,
   };
@@ -282,19 +284,32 @@
   }
   function stripMarks(s) { return s.replace(/^[*\/\s]+/, '').replace(/[,，]+$/, '').trim(); }
 
-  function classifyLine(line, cfg, mode) {
-    // mode: 'therapist' | 'fes'(FES열: 이름만, 전부 환자)
+  // 외국인 이름(영문): 'SHEN N'(접미 코드), 'G SHEN'(접두 1대다), 'SHEN'
+  const LATIN_RE = /^(?:([A-Z])\s+)?([A-Za-z]{3,})(?:\s+([A-Z]{1,2}))?$/;
+  function isEquipmentLine(line, cfg) {
+    const core = stripMarks(line.text);
+    return !!core && (cfg.equipmentWords || []).some(w => isIgnoredBy(core, w));
+  }
+  function classifyLine(line, cfg, mode, ctx) {
+    // mode: 'therapist' | 'fes'(FES열: 이름만, 전부 환자)   ctx.hasEquipment: 같은 칸에 장비명 줄이 있음
+    ctx = ctx || {};
     const text = line.text;
     const fesTokens = Array.from(text.matchAll(/FES\s*(\d+)\s*-\s*(\d)/g)).map(m => ({ team: parseInt(m[1], 10), slot: parseInt(m[2], 10), key: `${m[1]}-${m[2]}` }));
     if (fesTokens.length) return { type: 'fes', tokens: fesTokens, line };
     const core = stripMarks(text);
     if (!core) return { type: 'skip', line };
+    if ((cfg.equipmentWords || []).some(w => isIgnoredBy(core, w))) return { type: 'note', line, equipment: true };
     if (cfg.ignoreWords.some(w => isIgnoredBy(core, w))) return { type: 'note', line };
     if (/^[\d\s:]+$/.test(core) || /^\(.*\)$/.test(core) || /^-?\d+팀$/.test(core) || /[0-9]/.test(core)) return { type: 'note', line };
-    const m = NAME_RE.exec(core);
-    if (!m) return { type: 'note', line, odd: true };
-    const [, prefix, name, suffix] = m;
     const hadSlash = /^\s*[*\/]/.test(text);
+    let prefix, name, suffix;
+    const m = NAME_RE.exec(core.replace(/\s+/g, ''));
+    if (m) { [, prefix, name, suffix] = m; }
+    else {
+      const lm = LATIN_RE.exec(core);
+      if (!lm) return { type: 'note', line, odd: true };
+      prefix = lm[1] || ''; name = lm[2]; suffix = lm[3] || '';
+    }
     if (mode === 'fes') {
       // FES열: 접두/접미 무시, 이름만 환자. 동명이인 표기는 접미 1글자
       return { type: 'patient', kind: 'group', name, dup: suffix.slice(0, 1) || '', code: 'FES', line, hadSlash };
@@ -305,7 +320,7 @@
     }
     let dup = '', code = '';
     if (suffix.length === 2) { dup = suffix[0]; code = suffix[1]; }
-    else if (suffix.length === 1) { code = suffix; }
+    else if (suffix.length === 1) { if (ctx.hasEquipment) dup = suffix; else code = suffix; } // 장비 칸이면 알파벳 1글자는 동명이인
     const known = code ? cfg.oneCodes.includes(code) : false;
     return { type: 'patient', kind: 'one', name, dup, code, known, isFesOne: code === 'F', line, hadSlash, shortName: name.length === 2 };
   }
@@ -348,14 +363,19 @@
     const warnings = [];
     for (const col of target.columns) {
       if (col.kind !== 'therapist') continue;
-      const excluded = col.grey || (cfg.excludeHeaderWithParen && col.hasParen) || (cfg.excludeColumns || []).includes(col.letter);
-      const th = { col, name: col.name, excluded, excludeReason: col.grey ? '연차(회색 헤더)' : (col.hasParen ? '헤더 괄호' : (excluded ? '수동 제외' : '')), one: 0, group: 0, oneOther: 0, oneFes: 0, groupOther: 0, cells: [] };
+      const autoExcluded = col.grey || (cfg.excludeHeaderWithParen && col.hasParen);
+      const override = (cfg.columnOverrides || {})[col.letter]; // true=강제 제외, false=강제 포함
+      const excluded = override === undefined ? autoExcluded : override;
+      const reason = !excluded ? '' : (override === true ? '수동 제외' : (col.grey ? '연차(회색 헤더)' : '헤더 괄호'));
+      const th = { col, name: col.name, excluded, autoExcluded, excludeReason: reason, one: 0, group: 0, oneOther: 0, oneFes: 0, groupOther: 0, cells: [] };
       for (const row of target.rows) {
         const cell = target.cellAt(col.col, row.row);
         const entry = { row, ref: `${col.letter}${row.row}`, lines: [], one: 0, group: 0, skipped: !!row.skip };
         if (cell && !row.skip) {
-          for (const ln of cellToLines(cell)) {
-            const c = classifyLine(ln, cfg, 'therapist');
+          const lines = cellToLines(cell);
+          const ctx = { hasEquipment: lines.some(l => isEquipmentLine(l, cfg)) };
+          for (const ln of lines) {
+            const c = classifyLine(ln, cfg, 'therapist', ctx);
             const w = weightOf(ln);
             const out = { text: ln.text, color: ln.color, isGrey: ln.isGrey, strike: ln.strike, type: c.type, weight: w, tag: '' };
             if (c.type === 'patient') {
@@ -402,5 +422,5 @@
     return { target, therapists, warnings, cfg };
   }
 
-  root.PTCounter = { DEFAULTS, readWorkbook, interpretSchedule, cellToLines, classifyLine, analyze, normTime };
+  root.PTCounter = { DEFAULTS, readWorkbook, interpretSchedule, cellToLines, classifyLine, isEquipmentLine, analyze, normTime };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -92,10 +92,12 @@
       <input type="text" id="cfgGroup">
       <label>확정 1대1 치료코드 (접미) — 이 외 접미/코드 없음은 1대1 "기타"</label>
       <input type="text" id="cfgOne">
-      <label>환자로 세지 않는 장비·주석 단어 (쉼표 구분)</label>
+      <label>장비·평가 단어 (쉼표 구분) — 같은 칸의 환자는 1대1 "기타", 이름 뒤 알파벳 1글자는 동명이인으로 봄</label>
+      <input type="text" id="cfgEquip">
+      <label>그 밖의 주석 단어 (쉼표 구분) — 환자로 세지 않음</label>
       <input type="text" id="cfgIgnore">
-      <label><input type="checkbox" id="cfgParen"> 헤더에 괄호가 있는 치료사 열 제외 (예: 김효정B(통증), 신하린(8병동팀))</label>
-      <div id="colToggles" style="margin-top:8px"></div>
+      <div id="colToggles" style="margin-top:10px"></div>
+      <div style="font-size:12px;color:var(--muted);margin-top:4px">회색 헤더(연차)·괄호 헤더는 자동으로 제외됩니다. 체크를 풀면 포함, 체크하면 제외.</div>
     </details>
   </section>
 
@@ -125,22 +127,22 @@
 <script>
 (function () {
   const $ = id => document.getElementById(id);
-  const state = { schedules: [], errors: [], result: null, excludeColumns: new Set() };
+  const state = { schedules: [], errors: [], result: null, columnOverrides: {} };
 
   // 설정 UI ↔ 값
   const D = PTCounter.DEFAULTS;
   $('cfgGroup').value = D.groupPrefixes.join(', ');
   $('cfgOne').value = D.oneCodes.join(', ');
+  $('cfgEquip').value = D.equipmentWords.join(', ');
   $('cfgIgnore').value = D.ignoreWords.join(', ');
-  $('cfgParen').checked = D.excludeHeaderWithParen;
   function readCfg() {
     const split = s => s.split(/[,，]/).map(x => x.trim()).filter(Boolean);
     return {
       groupPrefixes: split($('cfgGroup').value).map(x => x.toUpperCase()),
       oneCodes: split($('cfgOne').value).map(x => x.toUpperCase()),
+      equipmentWords: split($('cfgEquip').value),
       ignoreWords: split($('cfgIgnore').value),
-      excludeHeaderWithParen: $('cfgParen').checked,
-      excludeColumns: Array.from(state.excludeColumns),
+      columnOverrides: state.columnOverrides,
     };
   }
 
@@ -151,7 +153,7 @@
   drop.addEventListener('dragleave', () => drop.classList.remove('over'));
   drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); addFiles(e.dataTransfer.files); });
   fi.addEventListener('change', () => { addFiles(fi.files); fi.value = ''; });
-  $('clearBtn').addEventListener('click', () => { state.schedules = []; state.errors = []; state.result = null; state.excludeColumns.clear(); renderFiles(); $('summaryCard').hidden = true; $('gridCard').hidden = true; $('colToggles').innerHTML = ''; });
+  $('clearBtn').addEventListener('click', () => { state.schedules = []; state.errors = []; state.result = null; state.columnOverrides = {}; renderFiles(); $('summaryCard').hidden = true; $('gridCard').hidden = true; $('colToggles').innerHTML = ''; });
 
   async function addFiles(list) {
     for (const f of Array.from(list)) {
@@ -201,14 +203,15 @@
   }
 
   function renderColToggles() {
-    const r = state.result; const box = $('colToggles'); box.innerHTML = '<label>열 개별 제외</label>';
+    const r = state.result; const box = $('colToggles'); box.innerHTML = '<label>열 제외 (체크 = 제외)</label>';
     for (const th of r.therapists) {
-      const id = 'ex_' + th.col.letter;
-      const l = document.createElement('label'); l.style.display = 'inline-block'; l.style.marginRight = '10px';
-      const auto = th.col.grey || (r.cfg.excludeHeaderWithParen && th.col.hasParen);
-      l.innerHTML = `<input type="checkbox" id="${id}" ${th.excluded ? 'checked' : ''} ${auto ? 'disabled' : ''}> ${esc(th.name)}${auto ? ' (자동)' : ''}`;
+      const l = document.createElement('label'); l.style.display = 'inline-block'; l.style.marginRight = '12px'; l.style.color = th.excluded ? 'var(--grey)' : '';
+      l.innerHTML = `<input type="checkbox" ${th.excluded ? 'checked' : ''}> ${esc(th.name)}${th.autoExcluded ? ' <small>(자동)</small>' : ''}`;
       box.appendChild(l);
-      l.querySelector('input').addEventListener('change', ev => { if (ev.target.checked) state.excludeColumns.add(th.col.letter); else state.excludeColumns.delete(th.col.letter); run(); });
+      l.querySelector('input').addEventListener('change', ev => {
+        if (ev.target.checked === th.autoExcluded) delete state.columnOverrides[th.col.letter]; else state.columnOverrides[th.col.letter] = ev.target.checked;
+        run();
+      });
     }
   }
 
